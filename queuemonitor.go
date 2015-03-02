@@ -86,7 +86,6 @@ func (qw QueueWatcher) run() {
 }
 
 func (qw QueueWatcher) processTask(status queueevents.TaskStatusStructure, delivery amqp.Delivery) {
-	var err error
 	if status.TaskId != "" {
 		tid := status.TaskId
 		tgid := status.TaskGroupId
@@ -121,10 +120,20 @@ func (qw QueueWatcher) processTask(status queueevents.TaskStatusStructure, deliv
 				env := payload["env"].(map[string]interface{})
 				if env["GECKO_HEAD_REPOSITORY"] != nil && env["GECKO_HEAD_REV"] != nil {
 					repository = env["GECKO_HEAD_REPOSITORY"].(string)
+					// fix up repo to match what we have in our config
+					repository := strings.Replace(repository, "https", "http", 1)
+					if repository[len(repository)-1] == '/' {
+						repository = repository[:len(repository)-1]
+					}
 					revision = env["GECKO_HEAD_REV"].(string)
+					pk := PushKey{ChangeSet: revision, RepoUrl: repository}
+					data, err := json.Marshal(pk)
+					if err != nil {
+						panic(err)
+					}
 					err = qw.InternalDB.Update(func(tx *bolt.Tx) error {
 						b := tx.Bucket(TgId2HgRepoRev)
-						return b.Put([]byte(tgid), []byte(repository+":"+revision))
+						return b.Put([]byte(tgid), data)
 					})
 					if err != nil {
 						panic(err)
@@ -177,6 +186,7 @@ type TaskData struct {
 	TaskGraphId string `json:"taskGraphId"`
 	Repository  string `json:"repository"`
 	ChangeSet   string `json:"changeset"`
+	PushTime    string `json:"pushtime"`
 }
 
 func (qw QueueWatcher) processTaskGraph(status schedulerevents.TaskGraphStatusStructure, delivery amqp.Delivery) {
@@ -184,10 +194,14 @@ func (qw QueueWatcher) processTaskGraph(status schedulerevents.TaskGraphStatusSt
 	qw.InternalDB.View(func(tx *bolt.Tx) error {
 		repoRev := tx.Bucket(TgId2HgRepoRev).Get(tgid)
 		if repoRev != nil {
-			slices := strings.Split(string(repoRev), ":")
-			repo := slices[0]
-			revision := slices[1]
+			// deserialise
+			pk := PushKey{}
+			err := json.Unmarshal(repoRev, &pk)
+			if err != nil {
+				panic(err)
+			}
 			// now join the hg repo data from the push log to the data collected from pulse...
+			// now update all tasks with this taskGraphId to have the hg revision and repo
 			qw.InternalDB.View(func(tx *bolt.Tx) error {
 				c := tx.Bucket(TaskDataBucket).Cursor()
 				prefix := append(tgid, ':')
@@ -198,8 +212,16 @@ func (qw QueueWatcher) processTaskGraph(status schedulerevents.TaskGraphStatusSt
 					if err != nil {
 						panic(err)
 					}
-					td.Repository = repo
-					td.ChangeSet = revision
+					td.Repository = pk.RepoUrl
+					td.ChangeSet = pk.ChangeSet
+
+					// now look up push time, maybe we processed it already
+					qw.InternalDB.View(func(tx *bolt.Tx) error {
+						b := tx.Bucket(hgCSet2PushTime)
+						td.PushTime = string(b.Get(repoRev))
+						return nil
+					})
+
 					// now serialise again
 					out, err := json.Marshal(td)
 					if err != nil {
