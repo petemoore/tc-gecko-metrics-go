@@ -17,7 +17,7 @@ tc-gecko-metrics-go ..... blah blah blah ....
 
 Usage:
     tc-gecko-metrics-go run -o OUTPUT-METRICS -i INTERNAL-DATA -r HG-REPOS-JSON-FILE
-    tc-gecko-metrics-go show -m MAPPING-FILE
+    tc-gecko-metrics-go show -i MAPPING-FILE
     tc-gecko-metrics-go --help
 
 Options:
@@ -51,14 +51,9 @@ func main() {
 	defer internalDB.Close()
 
 	if arguments["show"].(bool) {
-		internalDB.View(func(tx *bolt.Tx) error {
-			b := tx.Bucket([]byte("hgcset2pushtime"))
-			c := b.Cursor()
-			for k, v := c.First(); k != nil; k, v = c.Next() {
-				fmt.Printf("key=%s, value=%s\n", k, v)
-			}
-			return nil
-		})
+		show(internalDB, hgCSet2PushTime)
+		show(internalDB, TgId2HgRepoRev)
+		show(internalDB, TaskDataBucket)
 		os.Exit(0)
 	}
 
@@ -87,9 +82,9 @@ func main() {
 			HgRepository: hgRepositories[i], // data about which push log to monitor
 			InternalDB:   internalDB,
 		}
-		// sleep 7 seconds between each repo, so we don't hammer hg
+		// sleep 1 second between each repo, so we don't hammer hg
 		go rm.run()
-		time.Sleep(time.Second * 7)
+		time.Sleep(time.Second * 1)
 	}
 
 	// monitor amqp queues for completed tasks and completed task graphs
@@ -102,4 +97,15 @@ func main() {
 	// run forever...
 	forever := make(chan bool)
 	<-forever
+}
+
+func show(db *bolt.DB, bucketName []byte) {
+	db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketName)
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			fmt.Printf("key=%s, value=%s\n", k, v)
+		}
+		return nil
+	})
 }

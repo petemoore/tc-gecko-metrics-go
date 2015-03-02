@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"github.com/boltdb/bolt"
@@ -13,17 +14,29 @@ import (
 	"github.com/taskcluster/taskcluster-client-go/schedulerevents"
 	"log"
 	"os"
+	"strings"
 )
 
 var (
-	taskDataBucket = []byte("taskdata")
-	tgId2HgRepoRev = []byte("tgid2hgreporev")
+	TaskDataBucket = []byte("taskdata")
+	TgId2HgRepoRev = []byte("tgid2hgreporev")
 )
 
 type QueueWatcher struct {
 	InternalDB *bolt.DB
 	MetricsDB  *bolt.DB
 	Queue      *queue.Auth
+}
+
+func CreateBucket(db *bolt.DB, name []byte) {
+	// make sure bucket exists, before we update it later
+	db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists(name)
+		if err != nil {
+			return fmt.Errorf("create bucket: %s", err)
+		}
+		return nil
+	})
 }
 
 func (qw QueueWatcher) run() {
@@ -35,14 +48,8 @@ func (qw QueueWatcher) run() {
 		log.Fatal("You must set (and export) environment variable TASKCLUSTER_ACCESS_TOKEN.")
 	}
 	qw.Queue = queue.New(os.Getenv("TASKCLUSTER_CLIENT_ID"), os.Getenv("TASKCLUSTER_ACCESS_TOKEN"))
-	// make sure bucket exists, before we update it later
-	qw.InternalDB.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(taskDataBucket)
-		if err != nil {
-			return fmt.Errorf("create bucket: %s", err)
-		}
-		return nil
-	})
+	CreateBucket(qw.InternalDB, TaskDataBucket)
+	CreateBucket(qw.InternalDB, TgId2HgRepoRev)
 
 	// Passing all empty strings:
 	// empty user => use PULSE_USERNAME env var
@@ -116,8 +123,8 @@ func (qw QueueWatcher) processTask(status queueevents.TaskStatusStructure, deliv
 					repository = env["GECKO_HEAD_REPOSITORY"].(string)
 					revision = env["GECKO_HEAD_REV"].(string)
 					err = qw.InternalDB.Update(func(tx *bolt.Tx) error {
-						b := tx.Bucket(tgId2HgRepoRev)
-						return b.Put([]byte(tgid+":"+tid), []byte(repository+":"+revision))
+						b := tx.Bucket(TgId2HgRepoRev)
+						return b.Put([]byte(tgid), []byte(repository+":"+revision))
 					})
 					if err != nil {
 						panic(err)
@@ -130,14 +137,16 @@ func (qw QueueWatcher) processTask(status queueevents.TaskStatusStructure, deliv
 			fmt.Printf("Task Graph ID:  %v\n", tgid)
 
 			taskData := TaskData{
-				Exchange:   delivery.Exchange,
-				RoutingKey: delivery.RoutingKey,
-				State:      state,
-				Platform:   platform,
-				Symbol:     fmt.Sprintf("%v", symbol),
-				Scheduled:  scheduled,
-				Started:    started,
-				Resolved:   resolved,
+				TaskId:      tid,
+				TaskGraphId: tgid,
+				Exchange:    delivery.Exchange,
+				RoutingKey:  delivery.RoutingKey,
+				State:       state,
+				Platform:    platform,
+				Symbol:      fmt.Sprintf("%v", symbol),
+				Scheduled:   scheduled,
+				Started:     started,
+				Resolved:    resolved,
 			}
 
 			// convert to json
@@ -147,7 +156,7 @@ func (qw QueueWatcher) processTask(status queueevents.TaskStatusStructure, deliv
 			}
 
 			err = qw.InternalDB.Update(func(tx *bolt.Tx) error {
-				b := tx.Bucket(taskDataBucket)
+				b := tx.Bucket(TaskDataBucket)
 				return b.Put([]byte(tid+":"+tgid), data)
 			})
 			if err != nil {
@@ -166,7 +175,44 @@ type TaskData struct {
 	Scheduled  string `json:"scheduled"`
 	Started    string `json:"started"`
 	Resolved   string `json:"resolved"`
+
+	TaskId      string `json:"taskId"`
+	TaskGraphId string `json:"taskGraphId"`
+	Repository  string `json:"repository"`
+	ChangeSet   string `json:"changeset"`
 }
 
 func (qw QueueWatcher) processTaskGraph(status schedulerevents.TaskGraphStatusStructure, delivery amqp.Delivery) {
+	tgid := []byte(status.TaskGraphId)
+	qw.InternalDB.View(func(tx *bolt.Tx) error {
+		repoRev := tx.Bucket(TgId2HgRepoRev).Get(tgid)
+		if repoRev != nil {
+			slices := strings.Split(string(repoRev), ":")
+			repo := slices[0]
+			revision := slices[1]
+			// now join the hg repo data from the push log to the data collected from pulse...
+			qw.InternalDB.View(func(tx *bolt.Tx) error {
+				c := tx.Bucket(TaskDataBucket).Cursor()
+				prefix := append(tgid, ':')
+				for k, v := c.Seek(prefix); bytes.HasPrefix(k, prefix); k, v = c.Next() {
+					// now deserialise
+					td := TaskData{}
+					err := json.Unmarshal(v, &td)
+					if err != nil {
+						panic(err)
+					}
+					td.Repository = repo
+					td.ChangeSet = revision
+					// now serialise again
+					out, err := json.Marshal(td)
+					if err != nil {
+						panic(err)
+					}
+					fmt.Printf("%s\n", out)
+				}
+				return nil
+			})
+		}
+		return nil
+	})
 }

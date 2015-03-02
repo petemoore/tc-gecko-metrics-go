@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"github.com/boltdb/bolt"
 	"net/http"
 	"sort"
@@ -41,14 +40,8 @@ type HgRepository struct {
 type HgRepositories []HgRepository
 
 func (rm *RepositoryMonitor) run() {
-	// make sure bucket exists, before we update it later
-	rm.InternalDB.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(hgCSet2PushTime)
-		if err != nil {
-			return fmt.Errorf("create bucket: %s", err)
-		}
-		return nil
-	})
+	CreateBucket(rm.InternalDB, hgCSet2PushTime)
+
 	// Simple implementation where we check every 5 mins
 	// please note something more complex could be done
 	// here such as automatically adjusting the wait interval
