@@ -163,7 +163,7 @@ func (qw QueueWatcher) processTask(status queueevents.TaskStatusStructure, deliv
 
 			err = qw.InternalDB.Update(func(tx *bolt.Tx) error {
 				b := tx.Bucket(TaskDataBucket)
-				return b.Put([]byte(tid+":"+tgid), data)
+				return b.Put([]byte(tgid+":"+tid), data)
 			})
 			if err != nil {
 				panic(err)
@@ -191,9 +191,12 @@ type TaskData struct {
 
 func (qw QueueWatcher) processTaskGraph(status schedulerevents.TaskGraphStatusStructure, delivery amqp.Delivery) {
 	tgid := []byte(status.TaskGraphId)
+	fmt.Println("----------------------------------")
+	fmt.Println("--- Task Group ID: " + string(tgid))
 	qw.InternalDB.View(func(tx *bolt.Tx) error {
 		repoRev := tx.Bucket(TgId2HgRepoRev).Get(tgid)
 		if repoRev != nil {
+			fmt.Println("--- Repo Rev: " + string(repoRev))
 			// deserialise
 			pk := PushKey{}
 			err := json.Unmarshal(repoRev, &pk)
@@ -203,9 +206,12 @@ func (qw QueueWatcher) processTaskGraph(status schedulerevents.TaskGraphStatusSt
 			// now join the hg repo data from the push log to the data collected from pulse...
 			// now update all tasks with this taskGraphId to have the hg revision and repo
 			qw.InternalDB.View(func(tx *bolt.Tx) error {
+				fmt.Println("--- About to scan...")
 				c := tx.Bucket(TaskDataBucket).Cursor()
 				prefix := append(tgid, ':')
+				fmt.Println("--- Prefix: " + string(prefix))
 				for k, v := c.Seek(prefix); bytes.HasPrefix(k, prefix); k, v = c.Next() {
+					fmt.Printf("--- key=%s, value=%s\n", k, v)
 					// now deserialise
 					td := TaskData{}
 					err := json.Unmarshal(v, &td)
@@ -219,6 +225,7 @@ func (qw QueueWatcher) processTaskGraph(status schedulerevents.TaskGraphStatusSt
 					qw.InternalDB.View(func(tx *bolt.Tx) error {
 						b := tx.Bucket(hgCSet2PushTime)
 						td.PushTime = string(b.Get(repoRev))
+						fmt.Println("--- Push time: " + td.PushTime)
 						return nil
 					})
 
@@ -227,10 +234,19 @@ func (qw QueueWatcher) processTaskGraph(status schedulerevents.TaskGraphStatusSt
 					if err != nil {
 						panic(err)
 					}
-					fmt.Printf("%s\n", out)
+					fmt.Printf("--- Out: %s\n", out)
+					// now update
+					err = qw.InternalDB.Update(func(tx *bolt.Tx) error {
+						return tx.Bucket(TaskDataBucket).Put(k, out)
+					})
+					if err != nil {
+						panic(err)
+					}
 				}
 				return nil
 			})
+		} else {
+			fmt.Println("--- repoRev is nil")
 		}
 		return nil
 	})
