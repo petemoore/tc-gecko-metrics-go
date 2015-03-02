@@ -133,9 +133,6 @@ func (qw QueueWatcher) processTask(status queueevents.TaskStatusStructure, deliv
 			}
 		}
 		if platform != "" {
-			fmt.Printf("Task ID:        %v\n", tid)
-			fmt.Printf("Task Graph ID:  %v\n", tgid)
-
 			taskData := TaskData{
 				TaskId:      tid,
 				TaskGraphId: tgid,
