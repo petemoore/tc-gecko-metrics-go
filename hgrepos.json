@@ -1,0 +1,22 @@
+[
+	{
+		"name": "b2g-inbound",
+		"url":  "http://hg.mozilla.org/integration/b2g-inbound"
+	},
+	{
+		"name": "fx-team",
+		"url":  "http://hg.mozilla.org/integration/fx-team"
+	},
+	{
+		"name": "mozilla-inbound",
+		"url":  "http://hg.mozilla.org/integration/mozilla-inbound"
+	},
+	{
+		"name": "try",
+		"url":  "http://hg.mozilla.org/try"
+	},
+	{
+		"name": "mozilla-central",
+		"url":  "http://hg.mozilla.org/mozilla-central"
+	}
+]
