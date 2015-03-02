@@ -16,14 +16,14 @@ tc-gecko-metrics-go
 tc-gecko-metrics-go ..... blah blah blah ....
 
 Usage:
-    tc-gecko-metrics-go run -o OUTPUT-METRICS -m MAPPING-FILE -r HG-REPOS-JSON-FILE
+    tc-gecko-metrics-go run -o OUTPUT-METRICS -i INTERNAL-DATA -r HG-REPOS-JSON-FILE
     tc-gecko-metrics-go show -m MAPPING-FILE
     tc-gecko-metrics-go --help
 
 Options:
     -h --help               Display this help text.
     -o OUTPUT-METRICS       BoltDB for metrics data
-    -m MAPPING-FILE         BoltDB to persist mappings of hg changeset -> pushlog
+    -i INTERNAL-DATA        BoltDB to persist mappings of hg changeset -> pushlog
                             timestamp in. Useful if process crashes, so that
                             previously calculated values can be used on
                             subsequent run.
@@ -44,7 +44,7 @@ func main() {
 	}
 
 	// create new or open existing internal database
-	internalDB, err = bolt.Open(arguments["-m"].(string), 0644, &bolt.Options{Timeout: 1 * time.Second})
+	internalDB, err = bolt.Open(arguments["-i"].(string), 0644, &bolt.Options{Timeout: 1 * time.Second})
 	if err != nil {
 		panic(err)
 	}

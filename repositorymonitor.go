@@ -10,7 +10,9 @@ import (
 	"time"
 )
 
-var bucket = []byte("hgcset2pushtime")
+var (
+	hgCSet2PushTime = []byte("hgcset2pushtime")
+)
 
 type PushLogEntry struct {
 	ChangeSets []string `json:"changesets"`
@@ -41,7 +43,7 @@ type HgRepositories []HgRepository
 func (rm *RepositoryMonitor) run() {
 	// make sure bucket exists, before we update it later
 	rm.InternalDB.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(bucket)
+		_, err := tx.CreateBucketIfNotExists(hgCSet2PushTime)
 		if err != nil {
 			return fmt.Errorf("create bucket: %s", err)
 		}
@@ -99,11 +101,11 @@ func (rm *RepositoryMonitor) checkPushLog() {
 		}
 		// check if we have it in our DB already
 		err = rm.InternalDB.View(func(tx *bolt.Tx) error {
-			v := tx.Bucket(bucket).Get(key)
+			v := tx.Bucket(hgCSet2PushTime).Get(key)
 			if v == nil {
 				// we don't have data, let's add it...
 				return rm.InternalDB.Update(func(tx *bolt.Tx) error {
-					b := tx.Bucket(bucket)
+					b := tx.Bucket(hgCSet2PushTime)
 					return b.Put(key, []byte(time.Unix(spl[i].Date, 0).In(time.UTC).Format("2006-01-02T15:04:05.999Z07:00")))
 				})
 			}
