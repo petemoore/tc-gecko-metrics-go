@@ -72,6 +72,7 @@ func (qw QueueWatcher) run() {
 				qw.processTaskGraph(t.Status, delivery)
 			default:
 				fmt.Sprintf("Unrecognised message type %T!", t)
+				os.Exit(3)
 			}
 			delivery.Ack(false) // acknowledge message *after* processing
 		},
@@ -141,34 +142,38 @@ func (qw QueueWatcher) processTask(status queueevents.TaskStatusStructure, deliv
 				}
 			}
 		}
-		if platform != "" {
-			taskData := TaskData{
-				TaskId:      tid,
-				TaskGraphId: tgid,
-				Exchange:    delivery.Exchange,
-				RoutingKey:  delivery.RoutingKey,
-				State:       state,
-				Platform:    platform,
-				Symbol:      fmt.Sprintf("%v", symbol),
-				Scheduled:   scheduled,
-				Started:     started,
-				Resolved:    resolved,
-			}
-
-			// convert to json
-			data, err := json.Marshal(taskData)
-			if err != nil {
-				panic(err)
-			}
-
-			err = qw.InternalDB.Update(func(tx *bolt.Tx) error {
-				b := tx.Bucket(TaskDataBucket)
-				return b.Put([]byte(tgid+":"+tid), data)
-			})
-			if err != nil {
-				panic(err)
-			}
+		taskData := TaskData{
+			TaskId:      tid,
+			TaskGraphId: tgid,
+			Exchange:    delivery.Exchange,
+			RoutingKey:  delivery.RoutingKey,
+			State:       state,
+			Platform:    platform,
+			Symbol:      fmt.Sprintf("%v", symbol),
+			Scheduled:   scheduled,
+			Started:     started,
+			Resolved:    resolved,
 		}
+
+		fmt.Println("Adding new task data to database with TaskId: " + tid)
+
+		// convert to json
+		data, err := json.Marshal(taskData)
+		if err != nil {
+			panic(err)
+		}
+
+		err = qw.InternalDB.Update(func(tx *bolt.Tx) error {
+			b := tx.Bucket(TaskDataBucket)
+			return b.Put([]byte(tgid+":"+tid), data)
+		})
+		if err != nil {
+			panic(err)
+		}
+		fmt.Println(" ... added.")
+	} else {
+		fmt.Println("Mysteriously received a queue event with a Status.TaskId of null")
+		os.Exit(2)
 	}
 }
 
@@ -192,6 +197,7 @@ type TaskData struct {
 func (qw QueueWatcher) processTaskGraph(status schedulerevents.TaskGraphStatusStructure, delivery amqp.Delivery) {
 	tgid := []byte(status.TaskGraphId)
 	fmt.Println("----------------------------------")
+	fmt.Println("--- Received notification of a completed task graph...")
 	fmt.Println("--- Task Group ID: " + string(tgid))
 	qw.InternalDB.View(func(tx *bolt.Tx) error {
 		repoRev := tx.Bucket(TgId2HgRepoRev).Get(tgid)
@@ -246,7 +252,7 @@ func (qw QueueWatcher) processTaskGraph(status schedulerevents.TaskGraphStatusSt
 				return nil
 			})
 		} else {
-			fmt.Println("--- repoRev is nil")
+			fmt.Println("--- Unknown repo revision for completed task graph id " + string(tgid) + ": not processing any further")
 		}
 		return nil
 	})

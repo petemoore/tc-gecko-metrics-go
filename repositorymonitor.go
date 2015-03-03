@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"github.com/boltdb/bolt"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"time"
@@ -42,19 +44,22 @@ type HgRepositories []HgRepository
 func (rm *RepositoryMonitor) run() {
 	CreateBucket(rm.InternalDB, hgCSet2PushTime)
 
-	// Simple implementation where we check every 5 mins
+	// Simple implementation where we check every minute
 	// please note something more complex could be done
 	// here such as automatically adjusting the wait interval
 	// based on frequency of discovered updates, e.g. when
 	// there is little activity, we could increase interval
 	// between polls dynamically.
-	c := time.Tick(time.Second * 5)
+	c := time.Tick(time.Minute * 1)
 	for range c {
 		rm.checkPushLog()
 	}
+	fmt.Println("For some reason, the push log checking loop has exited for repo " + rm.HgRepository.Name + " (" + rm.HgRepository.URL + ")")
+	os.Exit(1)
 }
 
 func (rm *RepositoryMonitor) checkPushLog() {
+	fmt.Println("Checking push log for repo " + rm.HgRepository.Name + "...")
 	resp, err := http.Get(rm.HgRepository.URL + "/json-pushes")
 	if err != nil {
 		panic(err)
@@ -97,6 +102,7 @@ func (rm *RepositoryMonitor) checkPushLog() {
 			v := tx.Bucket(hgCSet2PushTime).Get(key)
 			if v == nil {
 				// we don't have data, let's add it...
+				fmt.Println("Found new push for " + rm.HgRepository.Name + ": " + lastChangeSet)
 				return rm.InternalDB.Update(func(tx *bolt.Tx) error {
 					b := tx.Bucket(hgCSet2PushTime)
 					return b.Put(key, []byte(time.Unix(spl[i].Date, 0).In(time.UTC).Format("2006-01-02T15:04:05.999Z07:00")))
