@@ -146,28 +146,28 @@ func (qw QueueWatcher) processTask(status queueevents.TaskStatusStructure, deliv
 			key:  tgid,
 			resp: qw.ReadResponse,
 		}
+		s := []string{}
+		NewTaskIds := make(map[string]bool)
+		NewTaskIds[tid] = true
+		s = append(s, tid)
 		x := <-qw.ReadResponse
 		if x != nil {
 			taskIds := x.(map[string]bool)
-			NewTaskIds := make(map[string]bool)
-			s := []string{}
 			for k, v := range taskIds {
 				NewTaskIds[k] = v
 				if v {
 					s = append(s, k)
 				}
 			}
-			NewTaskIds[tid] = true
-			s = append(s, tid)
-			fmt.Println("Writing new taskid list for task graph id " + tgid + ":")
-			fmt.Println(strings.Join(s, ", "))
-			TaskIdsWrite <- &writeOp{
-				key:  tgid,
-				val:  NewTaskIds,
-				resp: qw.WriteResponse,
-			}
-			<-qw.WriteResponse
 		}
+		fmt.Println("Writing new taskid list for task graph id " + tgid + ":")
+		fmt.Println(strings.Join(s, ", "))
+		TaskIdsWrite <- &writeOp{
+			key:  tgid,
+			val:  NewTaskIds,
+			resp: qw.WriteResponse,
+		}
+		<-qw.WriteResponse
 	} else {
 		fmt.Println("Mysteriously received a queue event with a Status.TaskId of null")
 		os.Exit(2)
