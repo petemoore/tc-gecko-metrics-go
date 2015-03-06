@@ -3,10 +3,8 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
+	// "encoding/json"
 	"fmt"
-	"github.com/boltdb/bolt"
 	"github.com/petemoore/pulse-go/pulse"
 	"github.com/streadway/amqp"
 	"github.com/taskcluster/taskcluster-client-go/queue"
@@ -17,29 +15,16 @@ import (
 	"strings"
 )
 
-var (
-	TaskDataBucket = []byte("taskdata")
-	TgId2HgRepoRev = []byte("tgid2hgreporev")
-)
-
 type QueueWatcher struct {
-	InternalDB *bolt.DB
-	MetricsDB  *bolt.DB
-	Queue      *queue.Auth
-}
-
-func CreateBucket(db *bolt.DB, name []byte) {
-	// make sure bucket exists, before we update it later
-	db.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(name)
-		if err != nil {
-			return fmt.Errorf("create bucket: %s", err)
-		}
-		return nil
-	})
+	Queue         *queue.Auth
+	ReadResponse  chan interface{}
+	WriteResponse chan bool
 }
 
 func (qw QueueWatcher) run() {
+
+	qw.ReadResponse = make(chan interface{})
+	qw.WriteResponse = make(chan bool)
 
 	if os.Getenv("TASKCLUSTER_CLIENT_ID") == "" {
 		log.Fatal("You must set (and export) environment variable TASKCLUSTER_CLIENT_ID.")
@@ -48,8 +33,6 @@ func (qw QueueWatcher) run() {
 		log.Fatal("You must set (and export) environment variable TASKCLUSTER_ACCESS_TOKEN.")
 	}
 	qw.Queue = queue.New(os.Getenv("TASKCLUSTER_CLIENT_ID"), os.Getenv("TASKCLUSTER_ACCESS_TOKEN"))
-	CreateBucket(qw.InternalDB, TaskDataBucket)
-	CreateBucket(qw.InternalDB, TgId2HgRepoRev)
 
 	// Passing all empty strings:
 	// empty user => use PULSE_USERNAME env var
@@ -128,17 +111,13 @@ func (qw QueueWatcher) processTask(status queueevents.TaskStatusStructure, deliv
 					}
 					revision = env["GECKO_HEAD_REV"].(string)
 					pk := PushKey{ChangeSet: revision, RepoUrl: repository}
-					data, err := json.Marshal(pk)
-					if err != nil {
-						panic(err)
+					fmt.Println("Writing Push Key for task graph id " + tgid + ":\n" + pk.String())
+					PushKeyWrite <- &writeOp{
+						key:  tgid,
+						val:  pk,
+						resp: qw.WriteResponse,
 					}
-					err = qw.InternalDB.Update(func(tx *bolt.Tx) error {
-						b := tx.Bucket(TgId2HgRepoRev)
-						return b.Put([]byte(tgid), data)
-					})
-					if err != nil {
-						panic(err)
-					}
+					<-qw.WriteResponse
 				}
 			}
 		}
@@ -155,22 +134,40 @@ func (qw QueueWatcher) processTask(status queueevents.TaskStatusStructure, deliv
 			Resolved:    resolved,
 		}
 
-		fmt.Println("Adding new task data to database with TaskId: " + tid)
-
-		// convert to json
-		data, err := json.Marshal(taskData)
-		if err != nil {
-			panic(err)
+		fmt.Println("Adding new task data to database with TaskId " + tid + ":\n" + taskData.String())
+		TaskDataWrite <- &writeOp{
+			key:  tid,
+			val:  taskData,
+			resp: qw.WriteResponse,
 		}
-
-		err = qw.InternalDB.Update(func(tx *bolt.Tx) error {
-			b := tx.Bucket(TaskDataBucket)
-			return b.Put([]byte(tgid+":"+tid), data)
-		})
-		if err != nil {
-			panic(err)
-		}
+		<-qw.WriteResponse
 		fmt.Println(" ... added.")
+		TaskIdsRead <- &readOp{
+			key:  tgid,
+			resp: qw.ReadResponse,
+		}
+		x := <-qw.ReadResponse
+		if x != nil {
+			taskIds := x.(map[string]bool)
+			NewTaskIds := make(map[string]bool)
+			s := []string{}
+			for k, v := range taskIds {
+				NewTaskIds[k] = v
+				if v {
+					s = append(s, k)
+				}
+			}
+			NewTaskIds[tid] = true
+			s = append(s, tid)
+			fmt.Println("Writing new taskid list for task graph id " + tgid + ":")
+			fmt.Println(strings.Join(s, ", "))
+			TaskIdsWrite <- &writeOp{
+				key:  tgid,
+				val:  NewTaskIds,
+				resp: qw.WriteResponse,
+			}
+			<-qw.WriteResponse
+		}
 	} else {
 		fmt.Println("Mysteriously received a queue event with a Status.TaskId of null")
 		os.Exit(2)
@@ -194,66 +191,93 @@ type TaskData struct {
 	PushTime    string `json:"pushtime"`
 }
 
+func (td *TaskData) String() string {
+	return fmt.Sprintf(`
+Exchange:      '%v'
+Routing Key:   '%v'
+State:         '%v'
+Platform:      '%v'
+Symbol:        '%v'
+Scheduled:     '%v'
+Started:       '%v'
+Resolved:      '%v'
+Task ID:       '%v'
+Task Graph ID: '%v'
+Repository:    '%v'
+Change Set:    '%v'
+Push Time:     '%v'
+`,
+		td.Exchange,
+		td.RoutingKey,
+		td.State,
+		td.Platform,
+		td.Symbol,
+		td.Scheduled,
+		td.Started,
+		td.Resolved,
+		td.TaskId,
+		td.TaskGraphId,
+		td.Repository,
+		td.ChangeSet,
+		td.PushTime,
+	)
+}
+
 func (qw QueueWatcher) processTaskGraph(status schedulerevents.TaskGraphStatusStructure, delivery amqp.Delivery) {
-	tgid := []byte(status.TaskGraphId)
+	tgid := status.TaskGraphId
 	fmt.Println("----------------------------------")
 	fmt.Println("--- Received notification of a completed task graph...")
-	fmt.Println("--- Task Group ID: " + string(tgid))
-	qw.InternalDB.View(func(tx *bolt.Tx) error {
-		repoRev := tx.Bucket(TgId2HgRepoRev).Get(tgid)
-		if repoRev != nil {
-			fmt.Println("--- Repo Rev: " + string(repoRev))
-			// deserialise
-			pk := PushKey{}
-			err := json.Unmarshal(repoRev, &pk)
-			if err != nil {
-				panic(err)
-			}
-			// now join the hg repo data from the push log to the data collected from pulse...
-			// now update all tasks with this taskGraphId to have the hg revision and repo
-			qw.InternalDB.View(func(tx *bolt.Tx) error {
-				fmt.Println("--- About to scan...")
-				c := tx.Bucket(TaskDataBucket).Cursor()
-				prefix := append(tgid, ':')
-				fmt.Println("--- Prefix: " + string(prefix))
-				for k, v := c.Seek(prefix); bytes.HasPrefix(k, prefix); k, v = c.Next() {
-					fmt.Printf("--- key=%s, value=%s\n", k, v)
-					// now deserialise
-					td := TaskData{}
-					err := json.Unmarshal(v, &td)
-					if err != nil {
-						panic(err)
-					}
-					td.Repository = pk.RepoUrl
-					td.ChangeSet = pk.ChangeSet
-
-					// now look up push time, maybe we processed it already
-					qw.InternalDB.View(func(tx *bolt.Tx) error {
-						b := tx.Bucket(hgCSet2PushTime)
-						td.PushTime = string(b.Get(repoRev))
-						fmt.Println("--- Push time: " + td.PushTime)
-						return nil
-					})
-
-					// now serialise again
-					out, err := json.Marshal(td)
-					if err != nil {
-						panic(err)
-					}
-					fmt.Printf("--- Out: %s\n", out)
-					// now update
-					err = qw.InternalDB.Update(func(tx *bolt.Tx) error {
-						return tx.Bucket(TaskDataBucket).Put(k, out)
-					})
-					if err != nil {
-						panic(err)
-					}
-				}
-				return nil
-			})
-		} else {
-			fmt.Println("--- Unknown repo revision for completed task graph id " + string(tgid) + ": not processing any further")
+	fmt.Println("--- Task Group ID: " + tgid)
+	// send message to channel in order to request read
+	PushKeyRead <- &readOp{
+		key:  tgid,
+		resp: qw.ReadResponse,
+	}
+	// result of read is fed back to given channel
+	x := <-qw.ReadResponse
+	if x != nil {
+		pk := x.(PushKey)
+		fmt.Println("--- Repo Rev: " + pk.ChangeSet + ", " + pk.RepoUrl)
+		// now join the hg repo data from the push log to the data collected from pulse...
+		// now update all tasks with this taskGraphId to have the hg revision and repo
+		TaskIdsRead <- &readOp{
+			key:  tgid,
+			resp: qw.ReadResponse,
 		}
-		return nil
-	})
+		x := <-qw.ReadResponse
+		if x != nil {
+			taskIds := x.(map[string]bool)
+			for taskId := range taskIds {
+				TaskDataRead <- &readOp{
+					key:  taskId,
+					resp: qw.ReadResponse,
+				}
+				td := (<-qw.ReadResponse).(TaskData)
+				td.Repository = pk.RepoUrl
+				td.ChangeSet = pk.ChangeSet
+
+				// now look up push time, maybe we processed it already
+				PushTimeRead <- &readOp{
+					key:  pk,
+					resp: qw.ReadResponse,
+				}
+				x2 := <-qw.ReadResponse
+				if x2 != nil {
+					td.PushTime = x2.(string)
+				}
+
+				fmt.Println("")
+				fmt.Println("Writing task id " + taskId + ":\n" + td.String())
+				fmt.Println("")
+				TaskDataWrite <- &writeOp{
+					key:  taskId,
+					val:  td,
+					resp: qw.WriteResponse,
+				}
+				<-qw.WriteResponse
+			}
+		}
+	} else {
+		fmt.Println("--- Unknown repo revision for completed task graph id " + string(tgid) + ": not processing any further")
+	}
 }
